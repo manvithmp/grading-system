@@ -4,6 +4,7 @@ import Upload from '../models/UploadHistory.js';
 import { processAnyFile } from '../utils/fileProcessor.js';
 
 export const uploadFile = async (req, res, next) => {
+  const started = Date.now();
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No file' });
@@ -11,10 +12,9 @@ export const uploadFile = async (req, res, next) => {
 
     const { path: filePath, originalname, mimetype, size, filename } = req.file;
 
-    // Parse file robustly (supports row-oriented and single-column stacked)
+    // Parse file -> docs
     const docs = processAnyFile(filePath, mimetype, originalname);
 
-    // Upsert by student_id to avoid duplicate key errors and allow re-uploads
     let upserted = 0;
     if (docs.length) {
       const ops = docs.map((s) => ({
@@ -25,10 +25,7 @@ export const uploadFile = async (req, res, next) => {
         }
       }));
       const result = await Student.bulkWrite(ops, { ordered: false });
-      upserted =
-        (result?.upsertedCount ?? 0) +
-        // when an existing doc is updated, modifiedCount increases
-        (result?.modifiedCount ?? 0);
+      upserted = (result?.upsertedCount ?? 0) + (result?.modifiedCount ?? 0);
     }
 
     await Upload.create({
@@ -39,24 +36,15 @@ export const uploadFile = async (req, res, next) => {
       recordsCount: docs.length,
       successfulRecords: upserted,
       failedRecords: Math.max(0, docs.length - upserted),
-      status: 'completed'
+      status: 'completed',
+      processingTime: Date.now() - started
     });
 
-    // cleanup
-    try {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    } catch {}
+    try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
 
-    return res.json({
-      success: true,
-      total: docs.length,
-      upserted
-    });
+    return res.json({ success: true, message: `Upserted ${upserted}/${docs.length}`, total: docs.length, upserted });
   } catch (err) {
-    // cleanup
-    try {
-      if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    } catch {}
+    try { if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path); } catch {}
     next(err);
   }
 };

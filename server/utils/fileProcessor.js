@@ -3,185 +3,140 @@ import Papa from 'papaparse';
 import fs from 'fs';
 import path from 'path';
 
-// ---------- helpers ----------
-const norm = (s = '') =>
-  String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '_');
+// Normalize header/labels: lower, trim, non-alnum -> _
+const norm = (s = '') => String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '_');
 
-const REQUIRED = ['student_id', 'student_name', 'total_marks', 'marks_obtained'];
-
-const isEmptyRow = (row = []) =>
-  row.every((cell) => String(cell ?? '').trim() === '');
-
-// Convert CSV text to a 2D matrix (array of arrays), no headers
-const csvToMatrix = (text) => {
-  const parsed = Papa.parse(text, {
-    header: false,
-    skipEmptyLines: 'greedy'
-  });
-  return parsed.data.map((row) =>
-    Array.isArray(row) ? row : [row]
-  );
-};
-
-// Read Excel first sheet to matrix (array of arrays)
+// Read Excel first sheet to array-of-arrays (AOA)
 const excelToMatrix = (filePath) => {
   const wb = XLSX.readFile(filePath);
   const ws = wb.Sheets[wb.SheetNames];
-  // header:1 gives array-of-arrays, defval to keep blanks
-  return XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  return XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }); // AOA mode
 };
 
-// Try to parse a normal row-oriented table (headers across the first row)
-const parseRowOriented = (matrix) => {
-  if (!matrix || matrix.length === 0) return [];
+// Read CSV to AOA
+const csvToMatrix = (text) => {
+  const out = Papa.parse(text, { header: false, skipEmptyLines: false });
+  // force AOA shape
+  return out.data.map((r) => (Array.isArray(r) ? r : [r]));
+};
 
-  // find the first non-empty row as header
-  let headerRowIdx = matrix.findIndex((r) => !isEmptyRow(r));
+// Utility: check if entire row is empty after trimming
+const isEmptyRow = (row = []) => row.every((c) => String(c ?? '').trim() === '');
+
+// Try parse row-oriented table with header row across columns
+const parseRowTable = (matrix) => {
+  if (!matrix?.length) return [];
+  const headerRowIdx = matrix.findIndex((r) => !isEmptyRow(r));
   if (headerRowIdx < 0) return [];
 
-  const headerRow = matrix[headerRowIdx].map((h) => norm(h));
+  const header = (matrix[headerRowIdx] || []).map((h) => norm(h));
+  const getIdx = (k) => header.indexOf(k);
   const idx = {
-    student_id: headerRow.indexOf('student_id'),
-    student_name: headerRow.indexOf('student_name'),
-    total_marks: headerRow.indexOf('total_marks'),
-    marks_obtained: headerRow.indexOf('marks_obtained'),
-    remarks: headerRow.indexOf('remarks')
+    id: getIdx('student_id'),
+    name: getIdx('student_name'),
+    total: getIdx('total_marks'),
+    obtained: getIdx('marks_obtained'),
+    remarks: getIdx('remarks')
   };
+  if (idx.id === -1 || idx.name === -1 || idx.total === -1 || idx.obtained === -1) return [];
 
-  // ensure required columns exist
-  if (REQUIRED.some((k) => idx[k] === -1)) return [];
-
-  const out = [];
+  const rows = [];
   for (let r = headerRowIdx + 1; r < matrix.length; r++) {
     const row = matrix[r] || [];
     if (isEmptyRow(row)) continue;
-
-    const student_id = String(row[idx.student_id] ?? '').trim();
-    const student_name = String(row[idx.student_name] ?? '').trim();
-    const total_marks = Number(row[idx.total_marks] ?? 0);
-    const marks_obtained = Number(row[idx.marks_obtained] ?? 0);
-    const remarks =
-      idx.remarks !== -1 ? String(row[idx.remarks] ?? '').trim() : '';
-
-    if (!student_id || !student_name) continue;
-
-    out.push({
-      student_id,
-      student_name,
-      total_marks,
-      marks_obtained,
-      remarks
-    });
+    const student_id = String(row[idx.id] ?? '').trim();
+    const student_name = String(row[idx.name] ?? '').trim();
+    const total_marks = Number(String(row[idx.total] ?? '').trim());
+    const marks_obtained = Number(String(row[idx.obtained] ?? '').trim());
+    const remarks = idx.remarks !== -1 ? String(row[idx.remarks] ?? '').trim() : '';
+    if (!student_id || !student_name || !Number.isFinite(total_marks) || !Number.isFinite(marks_obtained)) continue;
+    rows.push({ student_id, student_name, total_marks, marks_obtained, remarks });
   }
-  return out;
+  return rows;
 };
 
-// Parse a single-column “stacked” sheet:
-// [Student_ID, Student_Name, Total_Marks, Marks_Obtained, S001, Lisa..., 100, 57, (blank), S002, ...]
-const parseSingleColumnStacked = (matrix) => {
-  // flatten to a single column of trimmed lines
-  const col = [];
-  for (const r of matrix) {
-    const v = String((Array.isArray(r) ? r : r) ?? '').trim();
-    // keep blank separators as '' to help chunking
-    col.push(v);
+// Parse single-column stacked layout anywhere in Col A with optional blank separators
+const parseStackedColumn = (matrix) => {
+  // collapse to first column, trimming but keep empty lines as '' to separate records
+  const col = (matrix || []).map((r) => String((Array.isArray(r) ? r : r) ?? '').trim());
+
+  // find the first place where the next 4 non-empty lines are the required labels in order
+  const labelsWanted = ['student_id', 'student_name', 'total_marks', 'marks_obtained'];
+  const nextNonEmpty = (i) => {
+    let j = i;
+    while (j < col.length && col[j] === '') j++;
+    return j;
+  };
+
+  let start = -1;
+  for (let i = 0; i < col.length; i++) {
+    let j = nextNonEmpty(i);
+    const l1 = norm(col[j] || '');
+    j = nextNonEmpty(j + 1);
+    const l2 = norm(col[j] || '');
+    j = nextNonEmpty(j + 1);
+    const l3 = norm(col[j] || '');
+    j = nextNonEmpty(j + 1);
+    const l4 = norm(col[j] || '');
+    if (l1 === labelsWanted && l2 === labelsWanted[11] && l3 === labelsWanted[12] && l4 === labelsWanted[13]) {
+      start = i;
+      break;
+    }
   }
+  if (start === -1) return [];
 
-  // Remove leading blanks
-  while (col.length && col === '') col.shift();
+  // move pointer to first value line after the 4 labels
+  let p = nextNonEmpty(start);
+  p = nextNonEmpty(p + 1);
+  p = nextNonEmpty(p + 1);
+  p = nextNonEmpty(p + 1);
+  p = nextNonEmpty(p + 1);
 
-  // Expect first 4 lines to be the label names (any case/spacing)
-  const labels = col.slice(0, 4).map(norm);
-  const isHeaderOK =
-    labels.length === 4 &&
-    labels === 'student_id' &&
-    labels[4] === 'student_name' &&
-    labels[5] === 'total_marks' &&
-    labels[6] === 'marks_obtained';
-  if (!isHeaderOK) return [];
-
-  // After the first 4 labels, consume values in chunks of 4, skipping blanks
-  const vals = col.slice(4).filter((v) => v !== '' || v === '');
   const out = [];
-  let i = 0;
-  while (i < vals.length) {
-    // skip any blank lines between records
-    while (i < vals.length && vals[i] === '') i++;
-    if (i >= vals.length) break;
+  while (p < col.length) {
+    // skip separators
+    p = nextNonEmpty(p);
+    if (p >= col.length) break;
 
-    const student_id = String(vals[i++] ?? '').trim();
-    if (!student_id) break;
+    const student_id = String(col[p++] ?? '').trim();
+    p = nextNonEmpty(p);
+    const student_name = String(col[p++] ?? '').trim();
+    p = nextNonEmpty(p);
+    const total_marks = Number(String(col[p++] ?? '').trim());
+    p = nextNonEmpty(p);
+    const marks_obtained = Number(String(col[p++] ?? '').trim());
 
-    const student_name = String(vals[i++] ?? '').trim();
-    const total_marks = Number(String(vals[i++] ?? '').trim());
-    const marks_obtained = Number(String(vals[i++] ?? '').trim());
+    if (student_id && student_name && Number.isFinite(total_marks) && Number.isFinite(marks_obtained)) {
+      out.push({ student_id, student_name, total_marks, marks_obtained, remarks: '' });
+    }
 
-    out.push({
-      student_id,
-      student_name,
-      total_marks,
-      marks_obtained,
-      remarks: ''
-    });
-
-    // optional blank separator after each record
-    if (i < vals.length && vals[i] === '') i++;
+    // allow one optional blank separator
+    p = nextNonEmpty(p);
   }
   return out;
 };
 
-// High-level extractor: auto-detect layout and return normalized student docs
-const extractStudentsFromMatrix = (matrix) => {
-  if (!matrix || matrix.length === 0) return [];
-
-  // If any row has 3+ non-empty cells, assume normal row-oriented table
-  const maxWidth = Math.max(
-    0,
-    ...matrix.map((r) => (Array.isArray(r) ? r.filter((c) => String(c).trim() !== '').length : 0))
-  );
-
-  let students = [];
-  if (maxWidth >= 3) {
-    students = parseRowOriented(matrix);
-  } else {
-    students = parseSingleColumnStacked(matrix);
-  }
-
-  // Final cleaning and validation
-  const cleaned = students
-    .map((s) => ({
-      student_id: String(s.student_id ?? '').trim(),
-      student_name: String(s.student_name ?? '').trim(),
-      total_marks: Number(s.total_marks ?? 0),
-      marks_obtained: Number(s.marks_obtained ?? 0),
-      remarks: String(s.remarks ?? '').trim()
-    }))
-    .filter(
-      (s) =>
-        s.student_id &&
-        s.student_name &&
-        Number.isFinite(s.total_marks) &&
-        Number.isFinite(s.marks_obtained)
-    );
-
-  return cleaned;
-};
-
-// Public API: process a file (Excel/CSV) and return student docs
 export const processAnyFile = (filePath, mimetype, originalname) => {
   const ext = path.extname(originalname || '').toLowerCase();
   let matrix = [];
-
-  try {
-    if (mimetype?.includes('csv') || ext === '.csv') {
-      const text = fs.readFileSync(filePath, 'utf8');
-      matrix = csvToMatrix(text);
-    } else {
-      matrix = excelToMatrix(filePath);
-    }
-  } catch (e) {
-    throw new Error('File read/parse error');
+  if (mimetype?.includes('csv') || ext === '.csv') {
+    const text = fs.readFileSync(filePath, 'utf8');
+    matrix = csvToMatrix(text);
+  } else {
+    matrix = excelToMatrix(filePath);
   }
 
-  return extractStudentsFromMatrix(matrix);
+  // Heuristic: if many rows have width > 1, try row-table first
+  const widths = matrix.map((r) => (Array.isArray(r) ? r.filter((c) => String(c).trim() !== '').length : 0));
+  const multiCellRows = widths.filter((w) => w >= 3).length;
+  let docs = [];
+  if (multiCellRows >= Math.ceil(matrix.length * 0.2)) {
+    docs = parseRowTable(matrix);
+    if (!docs.length) docs = parseStackedColumn(matrix);
+  } else {
+    docs = parseStackedColumn(matrix);
+    if (!docs.length) docs = parseRowTable(matrix);
+  }
+
+  return docs;
 };

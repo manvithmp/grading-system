@@ -15,7 +15,7 @@ dotenv.config();
 connectDB();
 
 const app = express();
-app.set('trust proxy', 1);           // required on Render
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 5000;
 
 const allowedOrigins = [
@@ -31,7 +31,7 @@ app.use(
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
   })
 );
-app.options('*', cors({ origin: allowedOrigins, credentials: true }));
+// Removed the app.options('*', ...) line that was causing the error
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.use(compression());

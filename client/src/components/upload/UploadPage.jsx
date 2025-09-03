@@ -6,20 +6,19 @@ import { api } from '../../services/api.js';
 export default function UploadPage() {
   const [uploading, setUploading] = useState(false);
 
-  // ---------- handle the file ----------
   const onDrop = async (acceptedFiles) => {
-  const file = acceptedFiles?.[0]; // correct optional-chaining for arrays
-  if (!file) {
-    toast.error('Please select a file');
-    return;
-  }
+    const file = acceptedFiles?.[0]; 
+    if (!file) {
+      toast.error('Please select a file');
+      return;
+    }
 
     const form = new FormData();
-    form.append('file', file);               // MUST be "file" for upload.single('file')
+    form.append('file', file); 
 
     try {
       setUploading(true);
-      const { data } = await api.post('/upload', form); // baseURL already "/api"
+      const { data } = await api.post('/upload', form); 
       toast.success(`Inserted ${data.inserted}/${data.total}`);
     } catch (err) {
       toast.error(err?.response?.data?.message || 'Upload failed');
@@ -28,7 +27,6 @@ export default function UploadPage() {
     }
   };
 
-  // ---------- drop-zone ----------
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     multiple: false,
     maxFiles: 1,

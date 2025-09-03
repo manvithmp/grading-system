@@ -13,7 +13,6 @@ const storage = multer.diskStorage({
   }
 });
 
-// Accept common Excel/CSV extensions + MIME variants
 const allowedExt = new Set(['.csv', '.xlsx', '.xls']);
 const allowedMime = new Set([
   'text/csv',

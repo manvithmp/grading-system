@@ -6,13 +6,10 @@ import { processAnyFile } from '../utils/fileProcessor.js';
 export const uploadFile = async (req, res, next) => {
   const started = Date.now();
   try {
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: 'No file' });
-    }
+    if (!req.file) return res.status(400).json({ success: false, message: 'No file' });
 
     const { path: filePath, originalname, mimetype, size, filename } = req.file;
 
-    // Parse file -> docs
     const docs = processAnyFile(filePath, mimetype, originalname);
 
     let upserted = 0;
@@ -42,7 +39,12 @@ export const uploadFile = async (req, res, next) => {
 
     try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
 
-    return res.json({ success: true, message: `Upserted ${upserted}/${docs.length}`, total: docs.length, upserted });
+    return res.json({
+      success: true,
+      message: `Upserted ${upserted}/${docs.length}`,
+      total: docs.length,
+      upserted
+    });
   } catch (err) {
     try { if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path); } catch {}
     next(err);

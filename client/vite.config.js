@@ -6,12 +6,12 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // keep the /api prefix (backend expects /api/upload etc.)
+      
       '/api': {
         target: 'http://localhost:5000',
         changeOrigin: true,
         secure: false
-        // no rewrite
+       
       }
     }
   }

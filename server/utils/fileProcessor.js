@@ -3,150 +3,107 @@ import Papa from 'papaparse';
 import fs from 'fs';
 import path from 'path';
 
-// ---------- normalize ----------
-const norm = (s = '') => String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '_');
+const norm = s => String(s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '_');
+const isEmpty = row => row.length === 0;                 // ←  fix #2
 
-// ---------- read to array-of-arrays (AOA) ----------
-const excelToMatrices = (filePath) => {
-  const wb = XLSX.readFile(filePath); // read workbook [5]
-  const out = [];
-  for (const name of wb.SheetNames) {
-    const ws = wb.Sheets[name];
-    const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }); // AOA mode [6][5]
-    out.push({ name, aoa });
-  }
-  return out;
+/* ---------- helpers to read ---------- */
+const readCsv = file =>
+  Papa.parse(fs.readFileSync(file, 'utf8'), { header:false, skipEmptyLines:false })
+      .data.map(r => (Array.isArray(r) ? r : [r]));
+
+const readExcelSheets = file => {
+  const wb = XLSX.readFile(file);
+  return wb.SheetNames.map(name => ({
+    name,
+    aoa: XLSX.utils.sheet_to_json(                     // ←  fix #1
+            wb.Sheets[name],
+            { header:1, defval:'', raw:false }
+         )
+  }));
 };
 
-const csvToMatrix = (text) => {
-  const parsed = Papa.parse(text, { header: false, skipEmptyLines: false }); // raw rows [7]
-  return parsed.data.map((row) => (Array.isArray(row) ? row : [row]));
-};
+/* ---------- parse row-oriented table ---------- */
+const parseRowTable = aoa => {
+  const headIdx = aoa.findIndex(r => !isEmpty(r));
+  if (headIdx < 0) return [];
 
-const isEmptyRow = (row = []) => row.every((c) => String(c ?? '').trim() === '');
-
-// ---------- row-oriented table ----------
-const parseRowTable = (aoa) => {
-  if (!aoa?.length) return [];
-  const headerIdx = aoa.findIndex((r) => !isEmptyRow(r));
-  if (headerIdx < 0) return [];
-  const header = (aoa[headerIdx] || []).map((h) => norm(h));
-  const find = (k) => header.indexOf(k);
-  const idx = {
-    id: find('student_id'),
-    name: find('student_name'),
-    total: find('total_marks'),
-    obtained: find('marks_obtained'),
-    remarks: find('remarks')
+  const head = aoa[headIdx].map(norm);
+  const idx = k => head.indexOf(k);
+  const col = {
+    id  : idx('student_id'),
+    name: idx('student_name'),
+    tot : idx('total_marks'),
+    obt : idx('marks_obtained'),
+    rem : idx('remarks')
   };
-  if (idx.id < 0 || idx.name < 0 || idx.total < 0 || idx.obtained < 0) return [];
+  if (Object.values(col).some(i => i === -1)) return [];
 
   const out = [];
-  for (let r = headerIdx + 1; r < aoa.length; r++) {
+  for (let r = headIdx + 1; r < aoa.length; ++r) {
     const row = aoa[r] || [];
-    if (isEmptyRow(row)) continue;
-    const student_id = String(row[idx.id] ?? '').trim();
-    const student_name = String(row[idx.name] ?? '').trim();
-    const total_marks = Number(String(row[idx.total] ?? '').trim());
-    const marks_obtained = Number(String(row[idx.obtained] ?? '').trim());
-    const remarks = idx.remarks !== -1 ? String(row[idx.remarks] ?? '').trim() : '';
-    if (!student_id || !student_name || !Number.isFinite(total_marks) || !Number.isFinite(marks_obtained)) continue;
-    out.push({ student_id, student_name, total_marks, marks_obtained, remarks });
+    if (isEmpty(row)) continue;
+    const doc = {
+      student_id     : String(row[col.id]   ?? '').trim(),
+      student_name   : String(row[col.name] ?? '').trim(),
+      total_marks    : Number(row[col.tot]),
+      marks_obtained : Number(row[col.obt]),
+      remarks        : col.rem !== -1 ? String(row[col.rem] ?? '').trim() : ''
+    };
+    if (doc.student_id && doc.student_name && Number.isFinite(doc.total_marks) && Number.isFinite(doc.marks_obtained))
+      out.push(doc);
   }
   return out;
 };
 
-// ---------- stacked layout detector (scan any column) ----------
-const parseStackedAnyColumn = (aoa) => {
-  if (!aoa?.length) return [];
+/* ---------- parse stacked 4-line blocks in ANY column ---------- */
+const parseStacked = aoa => {
   const rows = aoa.length;
-  const maxCols = Math.max(0, ...aoa.map((r) => (Array.isArray(r) ? r.length : 0)));
-
-  const labels = ['student_id', 'student_name', 'total_marks', 'marks_obtained'];
-  const nextNonEmpty = (col, p) => {
-    let i = p;
-    while (i < rows && String((aoa[i]?.[col] ?? '')).trim() === '') i++;
-    return i;
-  };
+  const maxC = Math.max(0, ...aoa.map(r => r.length));
+  const lbl  = ['student_id','student_name','total_marks','marks_obtained'];
+  const next = (c,i) => { while (i<rows && String((aoa[i]?.[c]??'')).trim()==='') ++i; return i; };
 
   let best = [];
-  for (let c = 0; c < maxCols; c++) {
-    // search for the 4 label lines in order within this column
-    let foundAt = -1;
-    for (let r = 0; r < rows; r++) {
-      let p = nextNonEmpty(c, r);
-      const l1 = norm(aoa[p]?.[c] ?? '');
-      p = nextNonEmpty(c, p + 1);
-      const l2 = norm(aoa[p]?.[c] ?? '');
-      p = nextNonEmpty(c, p + 1);
-      const l3 = norm(aoa[p]?.[c] ?? '');
-      p = nextNonEmpty(c, p + 1);
-      const l4 = norm(aoa[p]?.[c] ?? '');
-      if (l1 === labels && l2 === labels[1] && l3 === labels[8] && l4 === labels[9]) {
-        foundAt = r;
-        break;
-      }
+  for (let c = 0; c < maxC; ++c) {
+    /* locate label sequence */
+    let base = -1;
+    for (let r = 0; r < rows; ++r) {
+      let p = next(c,r);
+      if (lbl.every((l,k)=> norm(aoa[next(c,p+k)]?.[c]??'') === l)) { base = p; break; }
     }
-    if (foundAt === -1) continue;
+    if (base === -1) continue;
 
-    // move pointer to first value after the 4 labels
-    let p = nextNonEmpty(c, foundAt);
-    p = nextNonEmpty(c, p + 1);
-    p = nextNonEmpty(c, p + 1);
-    p = nextNonEmpty(c, p + 1);
-    p = nextNonEmpty(c, p + 1);
-
-    const parsed = [];
+    /* parse records */
+    let p = base + 4;
+    const cur = [];
     while (p < rows) {
-      p = nextNonEmpty(c, p);
-      if (p >= rows) break;
-      const student_id = String((aoa[p++]?.[c] ?? '')).trim();
-
-      p = nextNonEmpty(c, p);
-      const student_name = String((aoa[p++]?.[c] ?? '')).trim();
-
-      p = nextNonEmpty(c, p);
-      const total_marks = Number(String((aoa[p++]?.[c] ?? '')).trim());
-
-      p = nextNonEmpty(c, p);
-      const marks_obtained = Number(String((aoa[p++]?.[c] ?? '')).trim());
-
-      if (student_id && student_name && Number.isFinite(total_marks) && Number.isFinite(marks_obtained)) {
-        parsed.push({ student_id, student_name, total_marks, marks_obtained, remarks: '' });
-      }
-      // allow optional blank separator
-      p = nextNonEmpty(c, p);
+      p = next(c,p); if (p>=rows) break;
+      const id   = String(aoa[p++]?.[c]??'').trim();
+      p = next(c,p); const nm = String(aoa[p++]?.[c]??'').trim();
+      p = next(c,p); const tot = Number(aoa[p++]?.[c]);
+      p = next(c,p); const obt = Number(aoa[p++]?.[c]);
+      if (id && nm && Number.isFinite(tot) && Number.isFinite(obt))
+        cur.push({ student_id:id, student_name:nm, total_marks:tot, marks_obtained:obt, remarks:'' });
+      p = next(c,p);          // skip optional blank line
     }
-
-    if (parsed.length > best.length) best = parsed;
+    if (cur.length > best.length) best = cur;
   }
   return best;
 };
 
-// ---------- choose best from all sheets ----------
-export const processAnyFile = (filePath, mimetype, originalname) => {
-  const ext = path.extname(originalname || '').toLowerCase();
+/* ---------- master extractor ---------- */
+export const processAnyFile = (file, mime, name) => {
+  const isCsv = mime?.includes('csv') || path.extname(name).toLowerCase() === '.csv';
 
-  let candidates = [];
-  if (mimetype?.includes('csv') || ext === '.csv') {
-    const text = fs.readFileSync(filePath, 'utf8'); // read CSV [7]
-    const aoa = csvToMatrix(text);
-    const fromRow = parseRowTable(aoa);
-    const fromStack = parseStackedAnyColumn(aoa);
-    candidates = [{ mode: 'row', count: fromRow.length, docs: fromRow }, { mode: 'stacked', count: fromStack.length, docs: fromStack }];
-  } else {
-    const sheets = excelToMatrices(filePath); // read all sheets [5]
-    for (const { name, aoa } of sheets) {
-      const fromRow = parseRowTable(aoa);
-      const fromStack = parseStackedAnyColumn(aoa);
-      candidates.push({ sheet: name, mode: 'row', count: fromRow.length, docs: fromRow });
-      candidates.push({ sheet: name, mode: 'stacked', count: fromStack.length, docs: fromStack });
-    }
+  const matrices = isCsv
+    ? [{ aoa: readCsv(file) }]
+    : readExcelSheets(file);
+
+  let best = [];
+  for (const { aoa } of matrices) {
+    const row = parseRowTable(aoa);
+    const stk = parseStacked(aoa);
+    const pick = row.length >= stk.length ? row : stk;
+    if (pick.length > best.length) best = pick;
   }
-
-  // pick the parse with the most docs
-  candidates.sort((a, b) => b.count - a.count);
-  const best = candidates || { count: 0, docs: [] };
-
-  return best.docs || [];
+  return best;
 };

@@ -1,52 +1,48 @@
 import fs from 'fs';
 import Student from '../models/Student.js';
-import Upload from '../models/UploadHistory.js';
+import Upload  from '../models/UploadHistory.js';
 import { processAnyFile } from '../utils/fileProcessor.js';
 
 export const uploadFile = async (req, res, next) => {
-  const started = Date.now();
+  const t0 = Date.now();
   try {
-    if (!req.file) return res.status(400).json({ success: false, message: 'No file' });
+    if (!req.file)
+      return res.status(400).json({ success:false, message:'No file' });
 
-    const { path: filePath, originalname, mimetype, size, filename } = req.file;
+    const { path:fp, originalname, mimetype, size, filename } = req.file;
+    const docs = processAnyFile(fp, mimetype, originalname);   // parsed rows
 
-    const docs = processAnyFile(filePath, mimetype, originalname);
-
+    /* bulk upsert */
     let upserted = 0;
     if (docs.length) {
-      const ops = docs.map((s) => ({
+      const ops = docs.map(d => ({
         updateOne: {
-          filter: { student_id: s.student_id },
-          update: { $set: s },
-          upsert: true
+          filter : { student_id:d.student_id },
+          update : { $set:d },
+          upsert : true
         }
       }));
-      const result = await Student.bulkWrite(ops, { ordered: false });
-      upserted = (result?.upsertedCount ?? 0) + (result?.modifiedCount ?? 0);
+      const r = await Student.bulkWrite(ops, { ordered:false });
+      upserted = (r.upsertedCount||0) + (r.modifiedCount||0);
     }
 
     await Upload.create({
       filename,
-      originalName: originalname,
-      fileSize: size,
-      mimeType: mimetype,
-      recordsCount: docs.length,
+      originalName : originalname,
+      fileSize     : size,
+      mimeType     : mimetype,
+      recordsCount : docs.length,
       successfulRecords: upserted,
-      failedRecords: Math.max(0, docs.length - upserted),
-      status: 'completed',
-      processingTime: Date.now() - started
+      failedRecords    : docs.length - upserted,
+      processingTime   : Date.now() - t0,
+      status:'completed'
     });
 
-    try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
+    try { fs.existsSync(fp) && fs.unlinkSync(fp); } catch {}
 
-    return res.json({
-      success: true,
-      message: `Upserted ${upserted}/${docs.length}`,
-      total: docs.length,
-      upserted
-    });
+    res.json({ success:true, message:`Upserted ${upserted}/${docs.length}`, total:docs.length });
   } catch (err) {
-    try { if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path); } catch {}
+    try { fs.existsSync(req.file?.path) && fs.unlinkSync(req.file.path); } catch {}
     next(err);
   }
 };
